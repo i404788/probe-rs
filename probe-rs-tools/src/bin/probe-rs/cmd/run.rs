@@ -247,7 +247,8 @@ impl Cmd {
 
         // TODO: Skip attach_probe & flashing, if user only wants to list tests (only possible when using embedded_test with protocol version >= 1)
 
-        let session = cli::attach_probe(&client, self.probe_options, elf_meta, false).await?;
+        let session =
+            cli::attach_probe(&client, self.probe_options, elf_meta, false, false).await?;
 
         let rtt_client = rtt_client(
             &session,

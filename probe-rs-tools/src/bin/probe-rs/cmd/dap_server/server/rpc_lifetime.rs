@@ -146,7 +146,7 @@ mod tests {
             attach_timeout: None,
         };
 
-        attach_probe(client, options, None, false).await?;
+        attach_probe(client, options, None, false, false).await?;
         Ok(())
     }
 

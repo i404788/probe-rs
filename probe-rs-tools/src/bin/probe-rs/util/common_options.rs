@@ -72,7 +72,12 @@ pub struct BinaryDownloadOptions {
     #[arg(long, help_heading = "DOWNLOAD CONFIGURATION")]
     pub verify: bool,
 
-    /// Whether to erase the entire chip before downloading
+    /// Whether to erase the entire chip before downloading.
+    ///
+    /// On TI MSPM0 devices this performs a DSSM factory reset instead: it
+    /// erases the main and non-main flash and clears the debug security
+    /// settings, which also recovers locked devices. Requires the probe's
+    /// nRESET pin to be wired to the target.
     #[arg(long, help_heading = "DOWNLOAD CONFIGURATION")]
     pub chip_erase: bool,
 

@@ -63,8 +63,8 @@ use probe_rs_rpc::monitor::{
     MonitorExitReason, MonitorMode, MonitorOptions, MonitorRequest, RttEvent, SemihostingEvent,
 };
 use probe_rs_rpc::probe::{
-    AttachRequest, AttachResult, DebugProbeEntry, DebugProbeSelector, SelectProbeRequest,
-    SelectProbeResult,
+    AttachRequest, AttachResult, DebugProbeEntry, DebugProbeSelector, FactoryResetRequest,
+    SelectProbeRequest, SelectProbeResult,
 };
 use probe_rs_rpc::reset::{ResetCoreAndHaltRequest, ResetCoreRequest};
 use probe_rs_rpc::rtt_client::{
@@ -88,12 +88,12 @@ use probe_rs_rpc::{
     CoreReadRegistersEndpoint, CoreRunEndpoint, CoreSetHwBpsEndpoint, CoreStatusEndpoint,
     CoreStepEndpoint, CoreWriteRegEndpoint, CoresStatusEndpoint, CreateRttClientEndpoint,
     CreateTempFileEndpoint, DisassembleEndpoint, EraseAllEndpoint, EraseRangeEndpoint,
-    EvaluateEndpoint, FlashEndpoint, GetRttChannelsEndpoint, HaltCoresEndpoint,
-    HandleSemihostingEndpoint, ListChipFamiliesEndpoint, ListProbesEndpoint, ListTestsEndpoint,
-    LoadChipFamilyEndpoint, LoadDebugInfoEndpoint, LoadRegionEndpoint, LoadSvdEndpoint,
-    MonitorEndpoint, NewFlashLoaderEndpoint, PollRttUpEndpoint, ProgressEventTopic,
-    ReadBytesEndpoint, ReadMemory8Endpoint, ReadMemory16Endpoint, ReadMemory32Endpoint,
-    ReadMemory64Endpoint, ResetCoreAndHaltEndpoint, ResetCoreEndpoint,
+    EvaluateEndpoint, FactoryResetEndpoint, FlashEndpoint, GetRttChannelsEndpoint,
+    HaltCoresEndpoint, HandleSemihostingEndpoint, ListChipFamiliesEndpoint, ListProbesEndpoint,
+    ListTestsEndpoint, LoadChipFamilyEndpoint, LoadDebugInfoEndpoint, LoadRegionEndpoint,
+    LoadSvdEndpoint, MonitorEndpoint, NewFlashLoaderEndpoint, PollRttUpEndpoint,
+    ProgressEventTopic, ReadBytesEndpoint, ReadMemory8Endpoint, ReadMemory16Endpoint,
+    ReadMemory32Endpoint, ReadMemory64Endpoint, ResetCoreAndHaltEndpoint, ResetCoreEndpoint,
     ResolveSourceBreakpointsEndpoint, ResolveSourceLocationsEndpoint, ResumeCoresEndpoint,
     RpcError, RpcResult, RttDownEndpoint, RttTopic, RunTestEndpoint, ScopesEndpoint,
     SelectProbeEndpoint, SemihostingTopic, SetVariableEndpoint, TakeRichStackTraceEndpoint,
@@ -664,6 +664,15 @@ impl RpcClient {
 
     pub async fn attach_probe(&self, request: AttachRequest) -> Result<AttachResult, ClientError> {
         self.send_resp::<AttachEndpoint, _>(&request).await
+    }
+
+    /// Run a TI MSPM0 DSSM factory reset against the given probe.
+    ///
+    /// Erases the main and non-main flash and clears all debug security
+    /// settings, recovering a locked device. Requires the probe's nRESET pin
+    /// to be wired to the target.
+    pub async fn factory_reset(&self, request: FactoryResetRequest) -> Result<(), ClientError> {
+        self.send_resp::<FactoryResetEndpoint, _>(&request).await
     }
 
     pub async fn list_probes(&self) -> Result<Vec<DebugProbeEntry>, ClientError> {

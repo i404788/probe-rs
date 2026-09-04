@@ -30,19 +30,40 @@ pub struct Cmd {
 
 impl Cmd {
     pub async fn run(self, client: RpcClient) -> anyhow::Result<()> {
-        let session = cli::attach_probe(&client, self.probe_options, None, false).await?;
+        let Self {
+            probe_options,
+            path,
+            mut download_options,
+            format_options,
+            start,
+        } = self;
+
+        // On TI MSPM0 devices, a chip erase is a DSSM factory reset: it erases
+        // the main and non-main flash and clears the debug security settings,
+        // which also recovers locked devices. The flash loader does not need
+        // to erase anything afterwards.
+        let chip_is_mspm0 = probe_options
+            .chip
+            .as_deref()
+            .is_some_and(probe_rs::vendor::ti::mspm0_dssm::is_mspm0_family);
+        let factory_reset = download_options.chip_erase && chip_is_mspm0;
+        if factory_reset {
+            download_options.chip_erase = false;
+        }
+
+        let session = cli::attach_probe(&client, probe_options, None, false, factory_reset).await?;
 
         let boot_info = cli::flash(
             &session,
-            &self.path,
-            self.format_options,
-            self.download_options,
+            &path,
+            format_options,
+            download_options,
             None,
             None,
         )
         .await?;
 
-        if self.start {
+        if start {
             session.boot(boot_info, 0).await?;
         }
 
