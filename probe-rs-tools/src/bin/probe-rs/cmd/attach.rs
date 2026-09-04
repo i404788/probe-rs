@@ -39,7 +39,7 @@ impl Cmd {
             None => (FileMetadata::default(), None),
         };
 
-        let session = cli::attach_probe(&client, self.probe_options, elf_meta, true).await?;
+        let session = cli::attach_probe(&client, self.probe_options, elf_meta, true, false).await?;
 
         let rtt_client = rtt_client(
             &session,

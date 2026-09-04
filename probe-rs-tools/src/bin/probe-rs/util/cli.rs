@@ -41,7 +41,8 @@ use probe_rs_rpc::format::FormatOptions;
 use probe_rs_rpc::monitor::{ChannelInfo, MonitorExitReason};
 use probe_rs_rpc::monitor::{MonitorMode, MonitorOptions, RttEvent, SemihostingEvent};
 use probe_rs_rpc::probe::{
-    AttachRequest, AttachResult, DebugProbeEntry, DebugProbeSelector, SelectProbeResult,
+    AttachRequest, AttachResult, DebugProbeEntry, DebugProbeSelector, FactoryResetRequest,
+    SelectProbeResult,
 };
 use probe_rs_rpc::rtt_client::ScanRegion;
 use probe_rs_rpc::rtt_config::RttChannelConfig;
@@ -58,6 +59,7 @@ pub async fn attach_probe(
     mut probe_options: ProbeOptions,
     elf_meta: Option<ElfMetadata>,
     resume_target: bool,
+    factory_reset: bool,
 ) -> anyhow::Result<SessionInterface> {
     let elf_meta = elf_meta.unwrap_or_default();
 
@@ -95,6 +97,23 @@ pub async fn attach_probe(
             return Err(error);
         }
     };
+
+    // A locked TI MSPM0 cannot be attached to at all: the ROM's DSSM mailbox is
+    // the only remaining debug access, and a factory reset through it is what
+    // makes the target attachable again.
+    if factory_reset {
+        let chip = probe_options.chip.as_deref().or(elf_meta.chip.as_deref());
+
+        if chip.is_some_and(probe_rs::vendor::ti::mspm0_dssm::is_mspm0_family) {
+            println!("{:>13}", "Factory reset");
+            client
+                .factory_reset(FactoryResetRequest {
+                    probe: probe.clone(),
+                })
+                .await?;
+            println!("{:>13} Erased main and non-main flash", "Factory reset");
+        }
+    }
 
     if probe_options.cycle_power {
         power_reset(

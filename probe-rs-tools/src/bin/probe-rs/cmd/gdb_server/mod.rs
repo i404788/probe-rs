@@ -65,7 +65,7 @@ impl Cmd {
             _ = registry.add_target_family_from_yaml(&yaml);
         }
 
-        let session = cli::attach_probe(&client, self.common, None, false).await?;
+        let session = cli::attach_probe(&client, self.common, None, false, false).await?;
 
         if self.reset_halt {
             session

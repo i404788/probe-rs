@@ -12,6 +12,7 @@ use crate::{
     },
 };
 
+pub mod mspm0_dssm;
 pub mod sequences;
 
 /// Texas Instruments

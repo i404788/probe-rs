@@ -3,15 +3,15 @@ use std::time::{Duration, Instant};
 use postcard_rpc::{header::VarHeader, server::Sender};
 use probe_rs::probe::DebugProbeSelector;
 use probe_rs_rpc::probe::{
-    AttachRequest, AttachResult, DebugProbeEntry, ListProbesResponse, SelectProbeRequest,
-    SelectProbeResponse, SelectProbeResult, WireProtocol,
+    AttachRequest, AttachResult, DebugProbeEntry, FactoryResetRequest, FactoryResetResponse,
+    ListProbesResponse, SelectProbeRequest, SelectProbeResponse, SelectProbeResult, WireProtocol,
 };
 
 use crate::rpc::functions::{RpcContext, RpcSpawnContext, WireTxImpl};
 use crate::util::common_options::{
     OPEN_RETRY_INTERVAL, OperationError, ProbeOptions, probe_may_become_available,
 };
-use probe_rs_rpc::{AttachEndpoint, RpcResult};
+use probe_rs_rpc::{AttachEndpoint, RpcError, RpcResult};
 
 pub fn list_probes(ctx: &mut RpcContext, _header: VarHeader, _request: ()) -> ListProbesResponse {
     let lister = ctx.lister();
@@ -198,6 +198,46 @@ fn attach_once(
     }
 
     Ok(AttachAttempt::Attached(Box::new(session)))
+}
+
+/// Run a TI MSPM0 DSSM factory reset against the selected probe.
+///
+/// This deliberately runs *outside* of a [`probe_rs::Session`]: a locked MSPM0
+/// exposes no MEM-AP, so the ROM's DSSM mailbox has to be driven through the
+/// SECAP access port on the raw DAP instead. After the reset the probe is
+/// released, and the caller can attach as usual.
+pub async fn factory_reset(
+    ctx: &mut RpcContext,
+    _header: VarHeader,
+    request: FactoryResetRequest,
+) -> FactoryResetResponse {
+    let selector = convert::from_wire_debug_probe_selector(request.probe.selector());
+
+    // Take exclusive use of the probe while we reset the device.
+    let broker = ctx.probe_broker().clone();
+    let _lease = broker.acquire(selector.clone()).await;
+
+    // Open the probe before any await point: the temporary `Lister` is not
+    // `Send`, and the handler future has to stay `Send`.
+    let opened = ctx.lister().open(selector);
+
+    let result = match opened {
+        Ok(probe) => {
+            match tokio::task::spawn_blocking(move || {
+                // The returned probe is detached and dropped; the caller is
+                // expected to open the probe again for the regular attach.
+                probe_rs::vendor::ti::mspm0_dssm::factory_reset(probe).map(drop)
+            })
+            .await
+            {
+                Ok(result) => result.map_err(anyhow::Error::from),
+                Err(error) => Err(anyhow::anyhow!("factory reset task failed: {error}")),
+            }
+        }
+        Err(error) => Err(anyhow::anyhow!("failed to open probe: {error}")),
+    };
+
+    result.map_err(|error| RpcError::from(error.to_string()))
 }
 
 #[cfg(test)]

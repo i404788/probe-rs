@@ -119,3 +119,11 @@ pub struct AttachRequest {
 }
 
 pub type AttachResponse = RpcResult<AttachResult>;
+
+#[derive(Serialize, Deserialize, Schema)]
+pub struct FactoryResetRequest {
+    /// The probe to run the factory reset against.
+    pub probe: DebugProbeEntry,
+}
+
+pub type FactoryResetResponse = RpcResult<()>;

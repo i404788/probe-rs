@@ -15,7 +15,7 @@ pub async fn basic_info(
         tracing::warn!("ignoring --chip option");
         probe.chip = None;
     }
-    let session = cli::attach_probe(client, probe, None, false).await?;
+    let session = cli::attach_probe(client, probe, None, false, false).await?;
     let metadata = session.target_metadata().await?;
     Ok(BasicDeviceInfo {
         chip: metadata.target_name,

@@ -27,7 +27,7 @@ use crate::rpc::{
         info::{target_info, target_metadata},
         memory::{read_bytes, read_memory, write_memory},
         monitor::monitor,
-        probe::{attach, list_probes, select_probe},
+        probe::{attach, factory_reset, list_probes, select_probe},
         reset::{reset, reset_and_halt},
         rtt_client::{
             clean_up_rtt, clear_rtt_control_block, create_rtt_client, get_rtt_channels,
@@ -404,6 +404,10 @@ impl RpcContext {
         Lister::with_lister(Box::new(ArcLister(self.lister.clone())))
     }
 
+    pub(crate) fn probe_broker(&self) -> &Arc<ProbeBroker> {
+        &self.probe_broker
+    }
+
     pub async fn registry(&self) -> impl DerefMut<Target = Registry> + Send + use<> {
         self.state.registry.clone().lock_owned().await
     }
@@ -467,6 +471,7 @@ postcard_rpc::define_dispatch! {
         | ListProbesEndpoint        | blocking  | list_probes       |
         | SelectProbeEndpoint       | async     | select_probe      |
         | AttachEndpoint            | spawn     | attach            |
+        | FactoryResetEndpoint      | async     | factory_reset     |
 
         | HaltCoresEndpoint                | async | halt_cores                 |
         | ResumeCoresEndpoint              | async | resume_cores               |
