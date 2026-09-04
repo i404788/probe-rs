@@ -1,0 +1,1 @@
+CC23xx/CC27xx flashing now also programs the CCFG user record from the image's `.ccfg` section, and the reset sequence activates SWD before pulsing nRESET so the ROM reliably enters SACI mode on closed devices.

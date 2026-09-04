@@ -110,6 +110,10 @@ impl ArmDebugSequence for CC23xxCC27xx {
         interface: &mut dyn DapAccess,
         dp: DpAddress,
     ) -> Result<(), ArmError> {
+        // Let the probe settle after the SWD connect; the first DP access
+        // otherwise intermittently returns a protocol error on this target.
+        thread::sleep(Duration::from_millis(10));
+
         self.debug_port_start_default(interface, dp)?;
 
         // CC23xx/CC27xx-specific: check device state via CFG-AP and exit SACI
@@ -194,6 +198,69 @@ impl ArmDebugSequence for CC23xxCC27xx {
         Some(Arc::new(CC23xxCC27xxFlashSequence::new_with_flag(
             Arc::clone(&self.saci_flash_mode),
         )))
+    }
+
+    /// Pulse nRESET to boot the part, activating the SWD debug port first.
+    ///
+    /// The part only enters SACI mode at boot if SWD is already connected, so
+    /// the SWD line reset must be sent while nRESET is high, before the
+    /// (ignored) DAP connect that happens while the part is in reset.
+    fn reset_hardware_assert(&self, interface: &mut dyn DapProbe) -> Result<(), ArmError> {
+        // nRESET and nTRST bits in the CMSIS-DAP `SWJ_Pins` command.
+        const NRESET: u32 = 1 << 7;
+        const NTRST: u32 = 1 << 5;
+        const RESET_PINS: u32 = NRESET | NTRST;
+
+        // Release the pins FIRST. probe-rs opens the probe (and performs the
+        // DAP connect) while nRESET is still held LOW, so the part is in reset
+        // when we get here; releasing first guarantees the HIGH->LOW->HIGH edge
+        // that triggers the boot ROM. Both nRESET and nTRST must be driven: the
+        // part only leaves reset when both are high (TI's OpenOCD does the same).
+        let pin_state = interface.swj_pins(RESET_PINS, RESET_PINS, 0)?;
+        tracing::debug!(
+            "Reset pins released (pre-pulse), pin state: {:#010b}",
+            pin_state
+        );
+        thread::sleep(Duration::from_millis(20));
+
+        // Activate the SWD debug port (line reset) now, with nRESET high: the
+        // activation sequence is only detected outside of reset, and the part
+        // enters SACI at boot only if SWD is already connected. The DAP connect
+        // above happened while the part was in reset and was ignored.
+        interface.swj_sequence(51, 0xFFFF_FFFF_FFFF)?;
+        tracing::debug!("SWD line reset sent (debug port activated)");
+        thread::sleep(Duration::from_millis(50));
+
+        // Assert: drive nRESET and nTRST LOW and hold for 5ms (the third
+        // argument is the hold time in µs). The reset is ignored unless the pin
+        // is held low for a few ms (TI's OpenOCD: `assert srst; sleep 5;
+        // deassert srst`).
+        let pin_state = interface.swj_pins(0, RESET_PINS, 5000)?;
+        tracing::debug!(
+            "Reset pins asserted (5ms hold), pin state: {:#010b}",
+            pin_state
+        );
+
+        // Deassert: release the pins (nRESET HIGH).
+        let pin_state = interface.swj_pins(RESET_PINS, RESET_PINS, 0)?;
+        tracing::debug!("Reset pins deasserted, pin state: {:#010b}", pin_state);
+
+        // Give the chip time to leave reset and start the boot ROM, and match
+        // TI's OpenOCD init which brings SWD up ~120ms after deassert
+        // (`sleep 60` twice around the reset in `ti_cc27xx.cfg`).
+        thread::sleep(Duration::from_millis(120));
+
+        Ok(())
+    }
+
+    fn reset_hardware_deassert(
+        &self,
+        _probe: &mut dyn ArmDebugInterface,
+        _default_ap: &FullyQualifiedApAddress,
+    ) -> Result<(), ArmError> {
+        // The reset was already pulsed (asserted and deasserted) by
+        // `reset_hardware_assert`; there is nothing left to do here.
+        Ok(())
     }
 
     /// Assert and deassert nRESET on every connect.
@@ -332,6 +399,11 @@ impl CC23xxCC27xxFlashSequence {
         Ok(())
     }
 
+    /// Word offset of the CCFG user record within the CCFG sector.
+    const CCFG_USER_REC_OFFSET: usize = 468;
+    /// Number of words in the CCFG user record (128 bytes).
+    const CCFG_USER_REC_WORDS: usize = 32;
+
     /// Program the CCFG sector using FLASH_PROG_CCFG_SECTOR
     ///
     /// Pads data to exactly 512 words (2048 bytes) with 0xFF. Sets skip_user_rec=1.
@@ -350,6 +422,27 @@ impl CC23xxCC27xxFlashSequence {
         saci::send_words(interface, &words, Duration::from_millis(200))?;
         let response = saci::read_response(interface, Duration::from_secs(5))?;
         saci::check_result(response, "FLASH_PROG_CCFG_SECTOR")?;
+
+        // The user record (words 468-499) is excluded from the sector
+        // programming by skip_user_rec=1 and must be programmed with a
+        // separate FLASH_PROG_CCFG_USER_REC command. That command is only
+        // accepted in the window right after the CCFG sector has been
+        // programmed in the same SACI session, hence it is sent here and not
+        // on any later call. If the image leaves the user record blank
+        // (all 0xFF), there is nothing to program.
+        let rec_start = Self::CCFG_USER_REC_OFFSET * 4;
+        let user_record =
+            &padded[rec_start..rec_start + Self::CCFG_USER_REC_WORDS * 4];
+        if !user_record.iter().all(|&byte| byte == 0xFF) {
+            let header = saci::make_header(saci::cmd::FLASH_PROG_CCFG_USER_REC, 0x0000);
+            let mut words = vec![header, saci::cmd::FLASH_KEY];
+            words.extend(saci::pack_words(user_record, 0xFF));
+
+            tracing::info!("CC23xx/CC27xx: Programming the CCFG user record");
+            saci::send_words(interface, &words, Duration::from_millis(200))?;
+            let response = saci::read_response(interface, Duration::from_secs(5))?;
+            saci::check_result(response, "FLASH_PROG_CCFG_USER_REC")?;
+        }
         Ok(())
     }
 

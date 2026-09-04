@@ -129,6 +129,12 @@ pub mod cmd {
     pub const FLASH_PROG_MAIN_PIPELINED: u32 = 0x0F;
     /// Program the CCFG sector (always a full 512 words).
     pub const FLASH_PROG_CCFG_SECTOR: u32 = 0x0C;
+    /// Program the CCFG user record (words 468-499).
+    ///
+    /// Only accepted in the window right after the CCFG sector has been
+    /// programmed in the same SACI session; against an already committed CCFG
+    /// the ROM replies `NotAllowed` (0x86).
+    pub const FLASH_PROG_CCFG_USER_REC: u32 = 0x0D;
     /// Verify MAIN flash sectors using CRC32.
     pub const FLASH_VERIFY_MAIN_SECTORS: u32 = 0x10;
     /// Verify the CCFG sector.
