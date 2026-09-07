@@ -34,6 +34,11 @@ fn secap() -> FullyQualifiedApAddress {
     FullyQualifiedApAddress::v1_with_default_dp(2)
 }
 
+/// The CFG-AP: APSEL 1 on every MSPM0 device. It reports the boot diagnostic.
+fn cfg_ap() -> FullyQualifiedApAddress {
+    FullyQualifiedApAddress::v1_with_default_dp(1)
+}
+
 /// SECAP `TDR` — transfer data register (command payload).
 const SECAP_TDR: u64 = 0x00;
 /// SECAP `TCR` — transfer command register (the DSSM command).
@@ -77,6 +82,11 @@ const RESET_SETTLE: Duration = Duration::from_millis(100);
 /// `DAP_SWJ_Pins` pin select/output bit for nRESET.
 const SWJ_PIN_NRESET: u32 = 1 << 7;
 
+/// CFG-AP register `0x10`: the boot diagnostic, written by the bootcode.
+const BOOTDIAG: u64 = 0x10;
+/// Boot diagnostic value TI's packs associate with a corrupted NONMAIN.
+const BOOTDIAG_NONMAIN_CORRUPTED: u32 = 0x36;
+
 /// Whether the given chip name belongs to the TI MSPM0/MSPS family.
 ///
 /// Uses the same name prefixes as [`super::TexasInstruments::try_create_debug_sequence`].
@@ -95,7 +105,16 @@ pub fn is_mspm0_family(chip_name: &str) -> bool {
 ///    acknowledge) the response.
 /// 4. Toggle nRST once more so the device leaves the ROM's command handling
 ///    with a clean slate.
-pub fn dssm_command(interface: &mut dyn ArmDebugInterface, command: u32) -> Result<(), ArmError> {
+///
+/// While the bootcode executes the command, the PWR-AP handling in the debug
+/// sequence must not run: its system reset would abort a mass erase or factory
+/// reset mid-operation. `sequence` is therefore suppressed for the duration of
+/// the poll phase.
+pub fn dssm_command(
+    interface: &mut dyn ArmDebugInterface,
+    sequence: &super::sequences::mspm0::MSPM0,
+    command: u32,
+) -> Result<(), ArmError> {
     let secap = secap();
 
     tracing::debug!("MSPM0 DSSM: issuing command {:#06x}", command);
@@ -112,6 +131,25 @@ pub fn dssm_command(interface: &mut dyn ArmDebugInterface, command: u32) -> Resu
     toggle_reset(interface)?;
 
     // The reset drops the SWD connection: bring the debug port back up so the
+    // mailbox can be polled. The PWR-AP recovery in the debug sequence must not
+    // run while the bootcode is working, so suppress it until we are done.
+    sequence.suppress_recovery();
+    let response = poll_response(interface, command);
+    sequence.resume_recovery();
+    response?;
+
+    // Make sure the ROM is done, then reset back to a sane system state.
+    std::thread::sleep(MAILBOX_SETTLE);
+    toggle_reset(interface)?;
+    std::thread::sleep(MAILBOX_SETTLE);
+
+    Ok(())
+}
+
+/// Poll for the response to a DSSM command, re-establishing the SWD link as
+/// needed, and validate the command echo.
+fn poll_response(interface: &mut dyn ArmDebugInterface, command: u32) -> Result<(), ArmError> {
+    // The reset drops the SWD connection: bring the debug port back up so the
     // mailbox can be polled. If the link is not back yet, the poll loop below
     // keeps retrying.
     if let Err(error) = interface.reinitialize() {
@@ -120,7 +158,7 @@ pub fn dssm_command(interface: &mut dyn ArmDebugInterface, command: u32) -> Resu
 
     let deadline = Instant::now() + RESPONSE_TIMEOUT;
     let rcr = loop {
-        match interface.read_raw_ap_register(&secap, SECAP_RCR) {
+        match interface.read_raw_ap_register(&secap(), SECAP_RCR) {
             Ok(rcr) if rcr & RCR_RX_VALID != 0 => break rcr,
             Ok(_) => {}
             Err(error) => {
@@ -132,12 +170,13 @@ pub fn dssm_command(interface: &mut dyn ArmDebugInterface, command: u32) -> Resu
             }
         }
         if Instant::now() >= deadline {
+            log_timeout_diagnostics(interface);
             return Err(ArmError::Timeout);
         }
         std::thread::sleep(RESPONSE_POLL_INTERVAL);
     };
 
-    let rxd = interface.read_raw_ap_register(&secap, SECAP_RXD)?;
+    let rxd = interface.read_raw_ap_register(&secap(), SECAP_RXD)?;
 
     // The command echo shares the low bits of `RCR` with the `RX_VALID` flag,
     // which is still set at this point (reading `RXD` above cleared it on the
@@ -162,12 +201,42 @@ pub fn dssm_command(interface: &mut dyn ArmDebugInterface, command: u32) -> Resu
 
     tracing::info!("MSPM0 DSSM: command {command:#06x} acknowledged by the ROM");
 
-    // Make sure the ROM is done, then reset back to a sane system state.
-    std::thread::sleep(MAILBOX_SETTLE);
-    toggle_reset(interface)?;
-    std::thread::sleep(MAILBOX_SETTLE);
-
     Ok(())
+}
+
+/// Log diagnostics when the bootcode does not respond to a DSSM command.
+///
+/// A silent bootcode usually means one of:
+///
+/// - the probe cannot actually toggle the nRST line (the command is never
+///   handed to the bootcode, which only samples the mailbox during boot), or
+/// - the device's NONMAIN configuration rejects mailbox commands outright
+///   (e.g. "Debug Disabled", or a corrupted NONMAIN whose pattern-match fields
+///   fail safe to a maximally secure configuration).
+///
+/// The CFG-AP boot diagnostic is read for the latter case, where TI's packs
+/// report e.g. `0x36` for a corrupted NONMAIN.
+fn log_timeout_diagnostics(interface: &mut dyn ArmDebugInterface) {
+    let bootdiag = interface.read_raw_ap_register(&cfg_ap(), BOOTDIAG);
+    match bootdiag {
+        Ok(value) => {
+            if value == BOOTDIAG_NONMAIN_CORRUPTED {
+                tracing::warn!(
+                    "MSPM0 DSSM: no response from the bootcode; CFG-AP boot diagnostic is \
+                     {value:#010x}: the NONMAIN configuration appears to be corrupted. If the \
+                     device still does not respond, it may not be recoverable over SWD."
+                );
+            } else {
+                tracing::warn!(
+                    "MSPM0 DSSM: no response from the bootcode; CFG-AP boot diagnostic is \
+                     {value:#010x}. Make sure the probe's nRST line is wired to the target and \
+                     can actually be driven low: the command is only serviced by the bootcode \
+                     during boot."
+                );
+            }
+        }
+        Err(error) => tracing::debug!("MSPM0 DSSM: failed to read the boot diagnostic: {error}"),
+    }
 }
 
 /// Assert nRST for a short time, then release it.
@@ -208,7 +277,7 @@ pub fn factory_reset(mut probe: Probe) -> Result<Probe, crate::Error> {
     // The MSPM0 sequence keeps the device out of DEEPSLEEP while we talk to it;
     // a blank device parks itself in STANDBY after a few seconds otherwise.
     let sequence = MSPM0::create("MSPM0".to_string());
-    let mut interface = match probe.try_into_arm_debug_interface(sequence) {
+    let mut interface = match probe.try_into_arm_debug_interface(sequence.clone()) {
         Ok(interface) => interface,
         Err((probe, error)) => {
             let mut probe = probe;
@@ -217,7 +286,7 @@ pub fn factory_reset(mut probe: Probe) -> Result<Probe, crate::Error> {
         }
     };
 
-    let result = dssm_command(&mut *interface, DSSM_CMD_FACTORY_RESET);
+    let result = dssm_command(&mut *interface, &sequence, DSSM_CMD_FACTORY_RESET);
 
     // First AP access triggered the DP setup implicitly; make sure the debug
     // port is selected even if the command failed before that point, so the

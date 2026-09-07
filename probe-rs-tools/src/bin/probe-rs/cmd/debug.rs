@@ -212,7 +212,7 @@ impl Cmd {
             if let Some(path) = &self.binary {
                 let (_file_meta, elf_meta) = parse_metadata(path).await?;
                 let session =
-                    cli::attach_probe(&client, self.common.clone(), elf_meta, false).await?;
+                    cli::attach_probe(&client, self.common.clone(), elf_meta, false, false).await?;
                 cli::flash(
                     &session,
                     path,

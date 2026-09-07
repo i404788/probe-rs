@@ -106,7 +106,7 @@ impl SessionData {
                 // Reuse the shared CLI helper: it uploads any user-supplied chip
                 // description, selects a probe, and performs the `probe/attach` RPC.
                 let probe_options = config.probe_options();
-                attach_probe_rpc(client, probe_options, None, false).await?
+                attach_probe_rpc(client, probe_options, None, false, false).await?
             }
         };
         let sessid = session.session_key();

@@ -15,6 +15,7 @@
 //! `tools/iar/low_power_mode_patch/*.dmac` `_InhibitSleepForceActive()`).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::architecture::arm::dp::DpAddress;
 use crate::architecture::arm::memory::ArmMemoryInterface;
@@ -74,6 +75,12 @@ pub struct MSPM0 {
     name: String,
     /// Whether this part needs the longer sticky-bit recovery sequence.
     long_recovery: bool,
+    /// Set while a DSSM mailbox command is in flight: the bootcode may be
+    /// executing a mass erase / factory reset, and a PWR-AP system reset now
+    /// would abort it mid-operation (leaving NONMAIN in a partially erased
+    /// state). `debug_port_start` skips the PWR-AP recovery while this flag is
+    /// set, so the DSSM poll loop can re-establish the SWD link safely.
+    suppress_recovery: AtomicBool,
 }
 
 impl MSPM0 {
@@ -86,7 +93,19 @@ impl MSPM0 {
         Arc::new(Self {
             name,
             long_recovery,
+            suppress_recovery: AtomicBool::new(false),
         })
+    }
+
+    /// Prevent [`ArmDebugSequence::debug_port_start`] from touching the PWR-AP
+    /// until [`Self::resume_recovery`] is called.
+    pub(crate) fn suppress_recovery(&self) {
+        self.suppress_recovery.store(true, Ordering::SeqCst);
+    }
+
+    /// Re-enable the PWR-AP handling in [`ArmDebugSequence::debug_port_start`].
+    pub(crate) fn resume_recovery(&self) {
+        self.suppress_recovery.store(false, Ordering::SeqCst);
     }
 
     /// Read `DPREC0` and log it, mirroring the `Message()` calls in TI's debug sequences.
@@ -109,7 +128,9 @@ impl MSPM0 {
 
     /// Recover a device whose `DPREC0` sticky bits are set.
     ///
-    /// The meaning of bits 23:21 is undocumented; this reproduces what TI's packs do.
+    /// The meaning of bits 23:21 is undocumented; this reproduces what TI's packs do. TI's
+    /// `DebugPortStart` sequence issues a PWR-AP system reset *before and after* writing
+    /// `DPREC0`, so that the corrected power state is applied by the second reset.
     fn recover_sticky(&self, interface: &mut dyn DapAccess) -> Result<(), ArmError> {
         tracing::warn!(
             "{}: DPREC0 sticky bits are set, running the PWR-AP recovery sequence",
@@ -131,6 +152,7 @@ impl MSPM0 {
         } else {
             // Writing the sticky bits back preserves them, as TI's packs do.
             self.write_dprec0(interface, DPREC0_DEBUG_ENABLE | DPREC0_STICKY)?;
+            self.write_sprec(interface, SPREC_SYS_RST)?;
         }
 
         self.read_dprec0(interface)?;
@@ -146,6 +168,18 @@ impl ArmDebugSequence for MSPM0 {
         dp: DpAddress,
     ) -> Result<(), ArmError> {
         self.debug_port_start_default(interface, dp)?;
+
+        // While a DSSM mailbox command is in flight, the bootcode may be executing a mass
+        // erase or factory reset. A PWR-AP system reset now would abort it mid-operation
+        // (potentially leaving NONMAIN half-erased), so skip all PWR-AP handling and let
+        // the DSSM poll loop get by on the plain debug port.
+        if self.suppress_recovery.load(Ordering::SeqCst) {
+            tracing::debug!(
+                "{}: PWR-AP handling suppressed while a DSSM command is in flight",
+                self.name
+            );
+            return Ok(());
+        }
 
         // Everything below is specific to MSPM0: keep the device out of DEEPSLEEP for as long as
         // we are attached, otherwise the AHB-AP disappears along with power domain PD1.
@@ -198,6 +232,19 @@ mod tests {
         assert_eq!(DPREC0_DEBUG_ENABLE, 0x0019_0008);
         assert_eq!(DPREC0_DEBUG_ENABLE | DPREC0_STICKY, 0x00F9_0008);
         assert_eq!(DPREC0_FORCEACTIVE, 0x0000_0008);
+    }
+
+    /// While a DSSM command is in flight the debug sequence must not touch the PWR-AP: its
+    /// system reset would abort a bootcode mass erase or factory reset mid-operation.
+    #[test]
+    fn dssm_command_suppresses_pwr_ap_handling() {
+        let sequence = MSPM0::create("MSPM0G3107".to_string());
+
+        assert!(!sequence.suppress_recovery.load(Ordering::SeqCst));
+        sequence.suppress_recovery();
+        assert!(sequence.suppress_recovery.load(Ordering::SeqCst));
+        sequence.resume_recovery();
+        assert!(!sequence.suppress_recovery.load(Ordering::SeqCst));
     }
 
     #[test]
